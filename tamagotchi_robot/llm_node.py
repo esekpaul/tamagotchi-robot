@@ -94,6 +94,16 @@ class TamagotchiLLMNode(Node):
             10
         )
 
+        # Subscriptie pentru recunoasterea emotiilor faciale
+        self.latest_emotion = None
+        self.latest_emotion_time = 0.0
+        self.emotion_sub = self.create_subscription(
+            String,
+            '/tamagotchi/emotion',
+            self.emotion_callback,
+            10
+        )
+
         # Publicare comenzi si sinteza vocala
         self.action_pub = self.create_publisher(String, '/tamagotchi/action', 10)
         self.speech_pub = self.create_publisher(String, '/tamagotchi/speech', 10)
@@ -147,6 +157,74 @@ class TamagotchiLLMNode(Node):
         if text:
             print(f"\n[Microfon Extern]: {text}")
             self.process_message(text)
+
+    def emotion_callback(self, msg: String):
+        """Primeste emotia faciala detectata de vision_node."""
+        try:
+            data = json.loads(msg.data)
+            self.latest_emotion = data.get('emotion')
+            self.latest_emotion_time = time.time()
+        except Exception:
+            pass
+
+    def check_face_emotion(self):
+        """Determina emotia faciala fie din vision_node, fie prin captura rapida de camera."""
+        now = time.time()
+        if self.latest_emotion and (now - self.latest_emotion_time < 4.0):
+            return self.latest_emotion
+
+        # Captura instantanee daca vision_node nu ruleaza
+        try:
+            import cv2
+            cap = cv2.VideoCapture(0)
+            if not cap.isOpened():
+                cap = cv2.VideoCapture(1)
+            if not cap.isOpened():
+                return 'no_camera'
+
+            ret, frame = cap.read()
+            cap.release()
+            if not ret:
+                return 'no_face'
+
+            cascade_path = '/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml'
+            smile_path = '/usr/share/opencv4/haarcascades/haarcascade_smile.xml'
+            model_path = os.path.expanduser('~/ros2_ws/src/tamagotchi_robot/models/emotion-ferplus-8.onnx')
+
+            face_cascade = cv2.CascadeClassifier(cascade_path)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5, minSize=(70, 70))
+            if len(faces) == 0:
+                return 'no_face'
+
+            x, y, w, h = sorted(faces, key=lambda f: f[2]*f[3], reverse=True)[0]
+            face_roi = gray[y:y+h, x:x+w]
+
+            smile_cascade = cv2.CascadeClassifier(smile_path)
+            mouth_roi = face_roi[int(h * 0.55):h, :]
+            smiles = smile_cascade.detectMultiScale(mouth_roi, scaleFactor=1.7, minNeighbors=18)
+            if len(smiles) > 0:
+                return 'happy'
+
+            if os.path.exists(model_path):
+                net = cv2.dnn.readNetFromONNX(model_path)
+                resized = cv2.resize(face_roi, (64, 64))
+                blob = resized.astype(np.float32).reshape(1, 1, 64, 64)
+                net.setInput(blob)
+                preds = net.forward()[0]
+                labels = ['neutral', 'happiness', 'surprise', 'sadness', 'anger', 'disgust', 'fear', 'contempt']
+                idx = int(np.argmax(preds))
+                top_label = labels[idx]
+                if top_label in ['happiness', 'surprise']:
+                    return 'happy'
+                elif top_label in ['sadness', 'anger', 'fear', 'disgust', 'contempt']:
+                    return 'sad'
+                else:
+                    return 'neutral'
+            return 'neutral'
+        except Exception as e:
+            self.get_logger().warn(f'Eroare analiza camera: {e}')
+            return 'no_face'
 
     def classify_intent(self, user_text: str):
         """
@@ -237,6 +315,11 @@ class TamagotchiLLMNode(Node):
             sanatate = self.stare_curenta.get('sanatate', 100)
             return f"Ham! Sunt vesel! Hrana mea este {hrana}%, energia {energie}%, sănătatea {sanatate}% și sunt {fericire}% fericit!", "status"
 
+        # 14. VIZIUNE FACIALA SI EMOTII (CAMERA LAPTOPULUI)
+        pat_vision = r'\bpriveste\w*\b|\buita\s+te\s+la\s+mine\b|\bcum\s+arat\b|\bsunt\s+(?:fericit|trist)\b|\bcum\s+ma\s+simt\b|\bvezi\s+fata\s+mea\b|\bcamera\b|\bfa\s+o\s+poza\b'
+        if re.search(pat_vision, norm):
+            return "VISION_CHECK", "vision_check"
+
         return None, None
 
     def process_message(self, user_text: str):
@@ -255,8 +338,28 @@ class TamagotchiLLMNode(Node):
             reply = "Zzz... Sforăi... Robotul doarme adânc! Spune-mi 'Trezește-te!' mai întâi dacă vrei să mă mișc!"
             action = 'NONE'
 
+        # Comanda speciala de analiza a expresiei faciale
+        elif action == 'vision_check':
+            print("👁️ [Camera AI]: Te privesc la cameră și îți citesc expresia feței...")
+            emotion = self.check_face_emotion()
+            if emotion == 'happy':
+                reply = "Ham ham! Te văd atât de fericit și cu un zâmbet minunat pe buze! Energia ta mă umple de bucurie! Hai să dansăm!"
+                action = 'play'
+            elif emotion == 'sad':
+                reply = "Ham... Te văd abătut și trist... Nu fi trist, animăluțul tău robot este mereu aici lângă tine! Fac o piruetă să te înveselesc!"
+                action = 'rotate:1'
+            elif emotion == 'neutral':
+                reply = "Ham! Te văd calm, serios și foarte concentrat! Eu sunt gata de joacă oricând ai chef!"
+                action = 'NONE'
+            elif emotion == 'no_camera':
+                reply = "Ham! Nu am putut accesa camera laptopului. Asigură-te că nu este blocată de alt program!"
+                action = 'NONE'
+            else:
+                reply = "Ham? Nu ți-am văzut bine fața la cameră. Privește drept spre ecranul laptopului și încearcă din nou!"
+                action = 'NONE'
+
         # Daca nu este o comanda directa, intrebam modelul LLM
-        if not action or action == 'status':
+        elif not action or action == 'status':
             hrana = self.stare_curenta.get('hrana', 80)
             energie = self.stare_curenta.get('energie', 90)
             fericire = self.stare_curenta.get('fericire', 75)
@@ -384,6 +487,7 @@ class TamagotchiLLMNode(Node):
         print("   Comenzi cheie de test:")
         print("   - 'Învârte-te de 10 ori' sau 'Răsucește-te de 5 ori' (Control precis!)")
         print("   - 'Dă turul arenei' (Navigație autonomă LiDAR la viteză mărită!)")
+        print("   - 'Privește-mă!' (Activează camera și reacționează dacă ești fericit sau trist!)")
         print("   - 'Mergi în față' / 'Mergi în spate' / 'Virează la stânga/dreapta'")
         print("   - 'Hai la joacă!' / 'Ia un măr!' / 'Du-te la culcare' / 'Trezește-te!'")
         print("   - 'Stop' (Oprire de urgență pe loc)")

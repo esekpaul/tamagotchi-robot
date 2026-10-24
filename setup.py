@@ -31,6 +31,7 @@ setup(
             'llm_node = tamagotchi_robot.llm_node:main',
             'motion_node = tamagotchi_robot.motion_node:main',
             'voice_node = tamagotchi_robot.voice_node:main',
+            'vision_node = tamagotchi_robot.vision_node:main',
         ],
     },
 )
