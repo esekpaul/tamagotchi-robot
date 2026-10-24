@@ -127,8 +127,14 @@ class TamagotchiStateNode(Node):
             self.sanatate = min(100, self.sanatate + 30)
             self.get_logger().info('Robotul a primit medicament! (+30 Sanatate)')
 
+        elif actiune.startswith('rotate') or actiune in ['forward', 'backward', 'forward_backward', 'turn_left', 'turn_right', 'inainte', 'inapoi', 'fata_spate', 'stanga', 'dreapta']:
+            if not self.este_adormit:
+                self.fericire = min(100, self.fericire + 10)
+                self.energie = max(0, self.energie - 5)
+                self.get_logger().info(f'Activitate fizica executata: "{actiune}"! (+10 Fericire, -5 Energie)')
+
         else:
-            self.get_logger().warn(f'Actiune necunoscuta: {actiune}. Foloseste: feed, play, sleep, wake, heal')
+            self.get_logger().warn(f'Actiune necunoscuta: {actiune}.')
 
 
 def main(args=None):
