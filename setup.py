@@ -30,6 +30,7 @@ setup(
             'state_node = tamagotchi_robot.state_node:main',
             'llm_node = tamagotchi_robot.llm_node:main',
             'motion_node = tamagotchi_robot.motion_node:main',
+            'voice_node = tamagotchi_robot.voice_node:main',
         ],
     },
 )
