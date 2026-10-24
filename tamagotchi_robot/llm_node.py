@@ -134,7 +134,7 @@ class TamagotchiLLMNode(Node):
             "Reguli stricte:\n"
             "1. Răspunde MEREU scurt, vesel și dragălaș în limba română (maxim 2 propoziții), ca un animăluț devotat ('Ham ham!').\n"
             "2. Nu spune NICIODATĂ că ești o simulare sau un model AI. Ești un cățeluș robot real!\n"
-            "3. Pe ultima linie OBLIGATORIU scrie exact: ACTIUNE: <FEED/PLAY/SLEEP/WAKE/HEAL/ROTATE:N/FORWARD/BACKWARD/FORWARD_BACKWARD/TURN_LEFT/TURN_RIGHT/NONE>.\n"
+            "3. Pe ultima linie OBLIGATORIU scrie exact: ACTIUNE: <FEED/PLAY/SLEEP/WAKE/HEAL/ROTATE:N/FORWARD/BACKWARD/FORWARD_BACKWARD/TURN_LEFT/TURN_RIGHT/ARENA_TOUR/STOP/NONE>.\n"
         )
 
         # Daca este o comanda directa de miscare, reactionam instant fara intarziere
@@ -205,6 +205,15 @@ class TamagotchiLLMNode(Node):
         if re.search(r'dreapta', u):
             return "Ham! Virez la dreapta!", "turn_right"
 
+        # 7. Turul arenei / Ocoleste arena pe langa perete
+        pat_arena = r'tur\w*\s+(?:de\s+|a\s+)?aren\w*|aren\w*.*tur\w*|pe\s+l[aâ]ng[aă]\s+perete|urmeaz[aă]\s+perete|ocol(?:ește|este)\s+arena|inconjoar[aă]\s+arena|(?:da|dă|fa|fă)\s+(?:o\s+)?tur[aă]|turul\s+arenei'
+        if re.search(pat_arena, u):
+            return "Ham ham! Merg la cel mai apropiat perete și încep turul arenei cu viteză mărită! Privește-mă!", "arena_tour"
+
+        # 8. Oprire / Stop pe loc
+        if any(w in u for w in ['stop', 'stai', 'oprire', 'opreste-te', 'oprește-te', 'stai pe loc']):
+            return "Ham! M-am oprit pe loc!", "stop"
+
         return None, None
 
     def ask_llm(self, system_prompt: str, user_text: str):
@@ -265,7 +274,16 @@ class TamagotchiLLMNode(Node):
         if any(w in u_lower for w in ['la dreapta', 'spre dreapta']):
             return "Ham! Virez la dreapta!", "turn_right"
 
-        # --- 7. Extragere din răspunsul LLM ---
+        # --- 7. Turul arenei / mers pe langa perete ---
+        pat_arena = r'tur\w*\s+(?:de\s+|a\s+)?aren\w*|aren\w*.*tur\w*|pe\s+l[aâ]ng[aă]\s+perete|urmeaz[aă]\s+perete|ocol(?:ește|este)\s+arena|inconjoar[aă]\s+arena|(?:da|dă|fa|fă)\s+(?:o\s+)?tur[aă]|turul\s+arenei'
+        if re.search(pat_arena, u_lower):
+            return "Ham ham! Merg la cel mai apropiat perete și încep turul arenei cu viteză mărită! Privește-mă!", "arena_tour"
+
+        # --- 8. Oprire / Stop ---
+        if any(w in u_lower for w in ['stop', 'stai', 'oprire', 'opreste-te', 'oprește-te', 'stai pe loc']):
+            return "Ham! M-am oprit pe loc!", "stop"
+
+        # --- 9. Extragere din răspunsul LLM ---
         action = 'NONE'
         match = re.search(r'ACTIUNE:\s*([A-Za-z0-9_:]+)', raw_content, re.IGNORECASE)
         if match:
@@ -296,7 +314,9 @@ class TamagotchiLLMNode(Node):
             'HEAL': "Mulțumesc pentru doctorie, mă simt mult mai sănătos!",
             'FORWARD': "Ham! Merg înainte cu pași mărunți!",
             'BACKWARD': "Ham! Merg cu spatele!",
-            'FORWARD_BACKWARD': "Ham ham! Mă plimb înainte și înapoi!"
+            'FORWARD_BACKWARD': "Ham ham! Mă plimb înainte și înapoi!",
+            'ARENA_TOUR': "Ham ham! Merg la cel mai apropiat perete și încep turul arenei!",
+            'STOP': "Ham! M-am oprit pe loc!"
         }
 
         # Curatare daca textul e gol sau are fraze rigide

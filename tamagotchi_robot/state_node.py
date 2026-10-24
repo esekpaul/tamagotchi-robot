@@ -127,6 +127,15 @@ class TamagotchiStateNode(Node):
             self.sanatate = min(100, self.sanatate + 30)
             self.get_logger().info('Robotul a primit medicament! (+30 Sanatate)')
 
+        elif actiune in ['arena_tour', 'turul_arenei', 'tura_arena', 'wall_follow']:
+            if not self.este_adormit:
+                self.fericire = min(100, self.fericire + 20)
+                self.energie = max(0, self.energie - 15)
+                self.get_logger().info('Turul arenei in desfasurare! (+20 Fericire, -15 Energie)')
+
+        elif actiune in ['stop', 'stai', 'oprire']:
+            self.get_logger().info('Robotul a fost oprit.')
+
         elif actiune.startswith('rotate') or actiune in ['forward', 'backward', 'forward_backward', 'turn_left', 'turn_right', 'inainte', 'inapoi', 'fata_spate', 'stanga', 'dreapta']:
             if not self.este_adormit:
                 self.fericire = min(100, self.fericire + 10)

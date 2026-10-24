@@ -16,6 +16,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 from geometry_msgs.msg import Twist, TwistStamped
+from sensor_msgs.msg import LaserScan
 
 
 class TamagotchiMotionNode(Node):
@@ -39,24 +40,48 @@ class TamagotchiMotionNode(Node):
             10
         )
 
+        # Subscriber pentru LiDAR (/scan) pentru turul arenei si evitarea obstacolelor
+        self.latest_scan = None
+        self.scan_sub = self.create_subscription(
+            LaserScan,
+            '/scan',
+            self.scan_callback,
+            10
+        )
+
         self.animatie_in_curs = False
+        self.stop_current_action = False
 
         self.get_logger().info(f'Nodul Tamagotchi Motion a pornit! (Mod: {"TwistStamped" if self.use_stamped else "Twist"})')
         self.get_logger().info('Asculta actiuni pe: /tamagotchi/action')
+        self.get_logger().info('Asculta senzor LiDAR pe: /scan')
         self.get_logger().info('Trimite miscari pe: /cmd_vel')
+
+    def scan_callback(self, msg: LaserScan):
+        """Salveaza ultima scanare LiDAR receptionata."""
+        self.latest_scan = msg
 
     def action_callback(self, msg: String):
         actiune = msg.data.strip().lower()
 
-        # Daca robotul doarme, oprim orice miscare imediat
-        if actiune in ['sleep', 'dormi', 'somn']:
+        # Daca robotul doarme sau se cere oprirea, oprim orice miscare imediat
+        if actiune in ['sleep', 'dormi', 'somn', 'stop', 'stai', 'oprire']:
+            self.stop_current_action = True
             self.stop_robot()
-            self.get_logger().info('Robotul doarme: motoarele sunt oprite complet.')
+            self.animatie_in_curs = False
+            self.get_logger().info('Robotul s-a oprit pe loc.')
             return
 
-        # Daca ruleaza deja o animatie, nu o intrerupem decat pentru sleep
+        # Daca ruleaza deja o animatie, nu o intrerupem decat pentru sleep/stop
         if self.animatie_in_curs:
             self.get_logger().info(f'Ignor actiunea "{actiune}", o alta miscare este deja in curs.')
+            return
+
+        self.stop_current_action = False
+
+        # --- Comanda speciala: Turul arenei (Wall Following) ---
+        if actiune in ['arena_tour', 'turul_arenei', 'tura_arena', 'wall_follow']:
+            threading.Thread(target=self.animatie_turul_arenei, daemon=True).start()
             return
 
         # --- Verificare comenzi cu parametri (de ex: rotate:3) ---
@@ -87,6 +112,158 @@ class TamagotchiMotionNode(Node):
             threading.Thread(target=self.animatie_trezire, daemon=True).start()
         elif actiune in ['heal', 'medicament']:
             threading.Thread(target=self.animatie_recunostinta, daemon=True).start()
+
+    def animatie_turul_arenei(self):
+        """
+        1. Identifica cel mai apropiat punct de peretele arenei folosind LiDAR (/scan).
+        2. Se orienteaza cu fata spre acel perete.
+        3. Avanseaza cu viteza marita pana la marginea arenei (~0.42m).
+        4. Vreaza stanga la 90 grade (pozitionand peretele pe dreapta).
+        5. Da turul arenei urmarind peretele (Right Wall Following) la viteza marita (~0.22 m/s).
+        """
+        self.animatie_in_curs = True
+        self.stop_current_action = False
+        self.get_logger().info('Incep comanda: TURUL ARENEI!')
+
+        # Asteptam scanarea LiDAR daca nu este inca disponibila
+        timeout_scan = time.time() + 3.0
+        while self.latest_scan is None and time.time() < timeout_scan and not self.stop_current_action:
+            time.sleep(0.05)
+
+        if self.latest_scan is None or self.stop_current_action:
+            self.get_logger().warn('Nu s-au receptionat date de la LiDAR (/scan) pentru turul arenei.')
+            self.animatie_in_curs = False
+            return
+
+        # --- FAZA 1: Orientare spre cel mai apropiat perete ---
+        self.get_logger().info('Faza 1: Caut cel mai apropiat perete al arenei...')
+        ranges = list(self.latest_scan.ranges)
+        curatate = []
+        for idx, r in enumerate(ranges):
+            if math.isnan(r) or math.isinf(r) or r < 0.12 or r > 5.0:
+                curatate.append((100.0, idx))
+            else:
+                curatate.append((r, idx))
+
+        dist_min, idx_min = min(curatate, key=lambda x: x[0])
+        self.get_logger().info(f'Cel mai apropiat perete: {dist_min:.2f}m la unghiul de {idx_min} grade.')
+
+        # Calculam unghiul relativ de rotatie
+        if idx_min <= 180:
+            unghi_rotatie_deg = float(idx_min)
+        else:
+            unghi_rotatie_deg = float(idx_min - 360)
+
+        # Ne rotim cu fata spre cel mai apropiat perete
+        if abs(unghi_rotatie_deg) > 5.0:
+            directie = 1.0 if unghi_rotatie_deg > 0 else -1.0
+            viteza_rot = 1.5 * directie
+            durata_rot = abs(math.radians(unghi_rotatie_deg) / 1.5)
+            self.get_logger().info(f'Ma rotesc spre perete: {unghi_rotatie_deg:.1f} grade ({durata_rot:.1f}s)...')
+            self.trimite_viteza(linear_x=0.0, angular_z=viteza_rot, durata_secunde=durata_rot)
+
+        if self.stop_current_action:
+            self.stop_robot()
+            self.animatie_in_curs = False
+            return
+
+        # --- FAZA 2: Inaintare spre perete la viteza marita ---
+        self.get_logger().info('Faza 2: Avansez cu viteza marita spre perete...')
+        viteza_inaintare = 0.22  # Viteza marita pentru TurtleBot3
+        dist_tinta = 0.42       # Distanta tinta fata de perete (m)
+
+        timp_start = time.time()
+        while (time.time() - timp_start < 15.0) and not self.stop_current_action and rclpy.ok():
+            if self.latest_scan:
+                scan_ranges = self.latest_scan.ranges
+                front_vals = []
+                for i in range(-15, 16):
+                    r = scan_ranges[i % 360]
+                    if not (math.isnan(r) or math.isinf(r) or r < 0.12):
+                        front_vals.append(r)
+                d_front = min(front_vals) if front_vals else 1.0
+            else:
+                d_front = 1.0
+
+            if d_front <= dist_tinta:
+                self.get_logger().info(f'Am ajuns langa perete ({d_front:.2f}m)!')
+                break
+
+            self.trimite_viteza_instant(linear_x=viteza_inaintare, angular_z=0.0)
+            time.sleep(0.05)
+
+        self.stop_robot()
+        time.sleep(0.2)
+
+        if self.stop_current_action:
+            self.animatie_in_curs = False
+            return
+
+        # --- FAZA 3: Aliniere paralela cu peretele (viraj stanga 90 grade) ---
+        self.get_logger().info('Faza 3: Virez la stanga pentru a incepe turul cu peretele in dreapta...')
+        durata_90 = (math.pi / 2.0) / 1.4
+        self.trimite_viteza(linear_x=0.0, angular_z=1.4, durata_secunde=durata_90)
+        self.stop_robot()
+        time.sleep(0.2)
+
+        if self.stop_current_action:
+            self.animatie_in_curs = False
+            return
+
+        # --- FAZA 4: Turul propriu-zis al arenei (Wall Following) la viteza marita ---
+        self.get_logger().info('Faza 4: Dau turul arenei pe langa perete!')
+        durata_tur = 60.0  # Durata turului complet (secunde)
+        start_tur = time.time()
+        d_perete_dorita = 0.38
+
+        while (time.time() - start_tur < durata_tur) and not self.stop_current_action and rclpy.ok():
+            if not self.latest_scan:
+                time.sleep(0.05)
+                continue
+
+            scan_ranges = self.latest_scan.ranges
+
+            # Sector Frontal (-25..+25 grade)
+            front_sector = [scan_ranges[i % 360] for i in range(-25, 26)
+                            if not (math.isnan(scan_ranges[i % 360]) or math.isinf(scan_ranges[i % 360]) or scan_ranges[i % 360] < 0.12)]
+            d_front = min(front_sector) if front_sector else 2.0
+
+            # Sector Dreapta-Fata (285..330 grade)
+            front_right_sector = [scan_ranges[i] for i in range(285, 331)
+                                  if not (math.isnan(scan_ranges[i]) or math.isinf(scan_ranges[i]) or scan_ranges[i] < 0.12)]
+            d_front_right = min(front_right_sector) if front_right_sector else 2.0
+
+            # Sector Dreapta (250..285 grade)
+            right_sector = [scan_ranges[i] for i in range(250, 286)
+                            if not (math.isnan(scan_ranges[i]) or math.isinf(scan_ranges[i]) or scan_ranges[i] < 0.12)]
+            d_right = min(right_sector) if right_sector else 2.0
+
+            # Logica de control reactiv pe langa perete:
+            if d_front < 0.42 or d_front_right < 0.32:
+                # Se apropie de un colt de perete -> viraj spre stanga
+                lin = 0.08
+                ang = 1.4
+            elif d_right < 0.28:
+                # Prea aproape de peretele din dreapta -> corectie stanga
+                lin = 0.20
+                ang = 0.65
+            elif d_right > 0.62:
+                # Depasire de colt / perete prea departe -> cauta peretele spre dreapta
+                lin = 0.16
+                ang = -0.75
+            else:
+                # Viteza marita in linie dreapta de-a lungul peretelui
+                eroare = d_right - d_perete_dorita
+                ang = -1.6 * eroare
+                ang = max(-0.8, min(0.8, ang))
+                lin = 0.22
+
+            self.trimite_viteza_instant(linear_x=lin, angular_z=ang)
+            time.sleep(0.05)
+
+        self.stop_robot()
+        self.animatie_in_curs = False
+        self.get_logger().info('Turul arenei s-a finalizat!')
 
     def animatie_rotatii(self, numar_rotatii: int):
         """Efectueaza exact N rotatii complete (360 grade fiecare)."""
@@ -180,20 +357,24 @@ class TamagotchiMotionNode(Node):
     def trimite_viteza(self, linear_x: float, angular_z: float, durata_secunde: float):
         """Trimite continuu mesaje de viteza timp de durata specificata."""
         sfarsit = time.time() + durata_secunde
-        while time.time() < sfarsit and rclpy.ok():
-            if self.use_stamped:
-                msg = TwistStamped()
-                msg.header.stamp = self.get_clock().now().to_msg()
-                msg.header.frame_id = 'base_link'
-                msg.twist.linear.x = float(linear_x)
-                msg.twist.angular.z = float(angular_z)
-                self.cmd_vel_pub.publish(msg)
-            else:
-                msg = Twist()
-                msg.linear.x = float(linear_x)
-                msg.angular.z = float(angular_z)
-                self.cmd_vel_pub.publish(msg)
+        while time.time() < sfarsit and rclpy.ok() and not self.stop_current_action:
+            self.trimite_viteza_instant(linear_x, angular_z)
             time.sleep(0.05)
+
+    def trimite_viteza_instant(self, linear_x: float, angular_z: float):
+        """Trimite un singur cadru de comanda de viteza."""
+        if self.use_stamped:
+            msg = TwistStamped()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = 'base_link'
+            msg.twist.linear.x = float(linear_x)
+            msg.twist.angular.z = float(angular_z)
+            self.cmd_vel_pub.publish(msg)
+        else:
+            msg = Twist()
+            msg.linear.x = float(linear_x)
+            msg.angular.z = float(angular_z)
+            self.cmd_vel_pub.publish(msg)
 
     def stop_robot(self):
         """Trimite viteza 0 pentru a opri rotile robotului."""
