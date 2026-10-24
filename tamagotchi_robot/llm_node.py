@@ -97,6 +97,7 @@ class TamagotchiLLMNode(Node):
         # Subscriptie pentru recunoasterea emotiilor faciale
         self.latest_emotion = None
         self.latest_emotion_time = 0.0
+        self.last_spontaneous_reaction = time.time()  # Evita reactia imediata la pornire
         self.emotion_sub = self.create_subscription(
             String,
             '/tamagotchi/emotion',
@@ -159,11 +160,25 @@ class TamagotchiLLMNode(Node):
             self.process_message(text)
 
     def emotion_callback(self, msg: String):
-        """Primeste emotia faciala detectata de vision_node."""
+        """Primeste emotia faciala detectata de vision_node si reactioneaza spontan cand te vede fericit sau trist."""
         try:
             data = json.loads(msg.data)
-            self.latest_emotion = data.get('emotion')
+            new_emotion = data.get('emotion')
+            confidence = data.get('confidence', 0.0)
+            self.latest_emotion = new_emotion
             self.latest_emotion_time = time.time()
+
+            now = time.time()
+            # Daca robotul este treaz si au trecut cel putin 15s de la ultima reactie spontana
+            if (self.stare_curenta.get('stare') != 'doarme') and (now - self.last_spontaneous_reaction > 15.0):
+                if new_emotion == 'happy' and confidence > 0.70:
+                    self.last_spontaneous_reaction = now
+                    print("\n👀 [Camera AI]: Te-am văzut zâmbind la cameră! Mă bucur și eu alături de tine!")
+                    self.process_message("privește-mă")
+                elif new_emotion == 'sad' and confidence > 0.70:
+                    self.last_spontaneous_reaction = now
+                    print("\n👀 [Camera AI]: Te-am văzut trist la cameră! Vin să te consolez!")
+                    self.process_message("privește-mă")
         except Exception:
             pass
 

@@ -67,8 +67,8 @@ class TamagotchiVisionNode(Node):
         self.last_published_emotion = None
         self.last_published_time = 0.0
 
-        # Timer procesare cadre la ~15 FPS
-        self.timer = self.create_timer(0.066, self.process_frame)
+        # Timer procesare cadre la 10 FPS (echilibru optim intre fluiditate si consum redus CPU)
+        self.timer = self.create_timer(0.10, self.process_frame)
 
     def classify_face_emotion(self, face_gray):
         """Clasifica emotia fetei folosind reteaua neuronala ONNX si Haar smile booster."""
@@ -117,18 +117,21 @@ class TamagotchiVisionNode(Node):
         frame = cv2.flip(frame, 1)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        faces = self.face_cascade.detectMultiScale(
-            gray,
+        # Optimizare CPU: detectie faciala pe rezolutie scalata la 50%
+        small_gray = cv2.resize(gray, (0, 0), fx=0.5, fy=0.5)
+        faces_small = self.face_cascade.detectMultiScale(
+            small_gray,
             scaleFactor=1.2,
-            minNeighbors=5,
-            minSize=(80, 80)
+            minNeighbors=4,
+            minSize=(40, 40)
         )
 
         detected_emotion = 'none'
         confidence = 0.0
 
-        if len(faces) > 0:
-            # Luam cea mai mare fata detectata (cea mai apropiata)
+        if len(faces_small) > 0:
+            # Rescalam coordonatele la dimensiunea originala
+            faces = [(x*2, y*2, w*2, h*2) for (x, y, w, h) in faces_small]
             faces_sorted = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
             x, y, w, h = faces_sorted[0]
             face_roi_gray = gray[y:y+h, x:x+w]
