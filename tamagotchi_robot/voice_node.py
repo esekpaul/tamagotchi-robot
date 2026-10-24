@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-Nodul de Comenzi Vocale (Tamagotchi Voice Node)
+Nodul Dedicat de Comenzi Vocale (Tamagotchi Voice Node)
 Proiect Sincretic: Robot Tamagotchi
-Asculta la microfon comenzi vocale in limba romana si le publica pe /tamagotchi/user_input
+Permite controlul vocal independent al robotului prin microfon:
+- Inregistrare audio la calitate 16kHz prin ALSA (arecord).
+- Transcriere automata a limbii romane prin Google Speech Recognition API.
+- Publicare pe /tamagotchi/user_input pentru prelucrare inteligenta in llm_node.
 """
 
 import os
@@ -24,27 +27,25 @@ class TamagotchiVoiceNode(Node):
     def __init__(self):
         super().__init__('tamagotchi_voice_node')
 
-        # Publisher pentru comenzile vocale recunoscute
         self.input_pub = self.create_publisher(String, '/tamagotchi/user_input', 10)
-
-        # Fisiere temporare audio
         self.audio_wav_path = '/tmp/tamagotchi_voice_input.wav'
 
         if not SPEECH_REC_AVAILABLE:
             self.get_logger().error('Pachetul SpeechRecognition nu este instalat!')
         else:
-            self.get_logger().info('Modulul de Recunoastere Vocala este gata!')
-            self.get_logger().info('Publica comenzile recunoscute pe: /tamagotchi/user_input')
+            self.get_logger().info('=' * 60)
+            self.get_logger().info('🎙️ Modulul Dedicat de Recunoastere Vocala este activ!')
+            self.get_logger().info('   Publica textul recunoscut pe: /tamagotchi/user_input')
+            self.get_logger().info('=' * 60)
 
-        # Pornim firul de executie pentru ascultare Push-to-Talk
         self.voice_thread = threading.Thread(target=self.voice_loop, daemon=True)
         self.voice_thread.start()
 
-    def record_audio(self, durata_secunde=4):
-        """Inregistreaza audio de la microfon folosind arecord (ALSA nativ Linux)."""
+    def record_audio(self, durata_secunde=4.0):
+        """Inregistreaza audio de la microfon folosind arecord la 16kHz mono."""
         cmd = [
             'arecord',
-            '-d', str(durata_secunde),
+            '-d', str(int(durata_secunde)),
             '-f', 'S16_LE',
             '-r', '16000',
             '-c', '1',
@@ -58,11 +59,14 @@ class TamagotchiVoiceNode(Node):
             return False
 
     def transcribe_audio(self):
-        """Transcreeaza fisierul audio in limba romana."""
+        """Transcrie fisierul audio in limba romana cu adaptare la zgomot ambiental."""
         if not os.path.exists(self.audio_wav_path):
             return None
 
         r = sr.Recognizer()
+        r.energy_threshold = 300
+        r.dynamic_energy_threshold = True
+
         try:
             with sr.AudioFile(self.audio_wav_path) as source:
                 audio = r.record(source)
@@ -71,7 +75,7 @@ class TamagotchiVoiceNode(Node):
         except sr.UnknownValueError:
             return None
         except sr.RequestError as e:
-            self.get_logger().warn(f'Eroare serviciu recunoastere vocala: {e}')
+            self.get_logger().warn(f'Eroare serviciu recunoastere vocala (lipsa internet?): {e}')
             return None
         except Exception as e:
             self.get_logger().warn(f'Eroare transcriere: {e}')
@@ -80,37 +84,37 @@ class TamagotchiVoiceNode(Node):
     def voice_loop(self):
         """Bucla interactiva: apasa Enter pentru a vorbi."""
         time.sleep(1.0)
-        print("\n" + "=" * 60)
-        print("🎙️  TAMAGOTCHI CONTROL VOCAL (Limba Romana)")
-        print("   Apasă [ENTER] -> Vorbește la microfon timp de 3-4 secunde!")
-        print("   Exemple vocale:")
-        print("   - 'Rotește-te de trei ori'")
-        print("   - 'Mergi în față'")
-        print("   - 'Hai la joacă'")
-        print("   - 'Ești flămând?'")
-        print("=" * 60)
+        print("\n" + "=" * 65)
+        print("🎙️  TAMAGOTCHI VOCAL CONSOLE (Limba Română)")
+        print("   👉 Apasă [ENTER] și vorbește clar la microfon timp de 4 secunde!")
+        print("   Exemple de comenzi vocale:")
+        print("   - 'Învârte-te de 10 ori' / 'Răsucește-te de 5 ori'")
+        print("   - 'Dă turul arenei' / 'Fă o tură de arenă'")
+        print("   - 'Mergi în față' / 'Mergi în spate' / 'Virează la stânga'")
+        print("   - 'Hai la joacă' / 'Ia un măr' / 'Du-te la culcare'")
+        print("   - 'Stop' (Oprire imediată)")
+        print("=" * 65)
 
         while rclpy.ok():
             try:
-                input("\n👉 Apasă [ENTER] și vorbește: ")
-                print("🔴 ASCULT... Vorbește acum! (3 secunde)")
-                
-                success = self.record_audio(durata_secunde=3)
+                input("\n👉 Apasă [ENTER] pentru a vorbi: ")
+                print("🔴 ASCULTĂM... Vorbește acum la microfon (4 secunde)!")
+
+                success = self.record_audio(durata_secunde=4.0)
                 if not success:
-                    print("❌ Nu am putut accesa microfonul.")
+                    print("❌ Nu am putut accesa microfonul dispozitivului.")
                     continue
 
-                print("⏳ Recunosc comanda...")
+                print("⏳ Procesez comanda...")
                 text = self.transcribe_audio()
 
                 if text:
-                    print(f"✅ Ai spus: \"{text}\"")
-                    # Publicam mesajul vocal pe topicul de intrare pentru robot
+                    print(f"✅ Comandă recunoscută: \"{text}\"")
                     msg = String()
                     msg.data = text
                     self.input_pub.publish(msg)
                 else:
-                    print("⚠️ Nu am deslusit ce ai spus. Incearca sa vorbesti mai clar si mai aproape de microfon.")
+                    print("⚠️ Nu am deslușit comanda. Încearcă să vorbești mai tare sau mai aproape de microfon.")
 
             except (EOFError, KeyboardInterrupt):
                 break
