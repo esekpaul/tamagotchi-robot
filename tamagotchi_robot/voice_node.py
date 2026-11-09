@@ -43,6 +43,11 @@ class TamagotchiVoiceNode(Node):
 
     def record_audio(self, durata_secunde=4.0):
         """Inregistreaza audio de la microfon folosind arecord la 16kHz mono."""
+        try:
+            subprocess.run(['spd-say', '-S'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(0.15)
+        except Exception:
+            pass
         cmd = [
             'arecord',
             '-d', str(int(durata_secunde)),

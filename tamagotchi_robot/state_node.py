@@ -8,11 +8,10 @@ Simuleaza ciclul biologic si nevoile de viata ale animatului robot:
 3. Fericire (0-100%)
 4. Sanatate (0-100%)
 5. Mod: Treaz / Adormit
-Publica periodic starea pe /tamagotchi/status si reactioneaza la actiuni primite pe /tamagotchi/action.
+Publica periodic starea pe /tamagotchi/status si reactioneaza imediat la actiuni primite pe /tamagotchi/action.
 """
 
 import json
-import random
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
@@ -48,6 +47,22 @@ class TamagotchiStateNode(Node):
         self.get_logger().info('   - Asculta actiuni pe: /tamagotchi/action')
         self.get_logger().info('=' * 60)
 
+        # Publicam starea initiala imediat
+        self.publish_status()
+
+    def publish_status(self):
+        """Publica pachetul de stare in format JSON pe /tamagotchi/status."""
+        stare_dict = {
+            'hrana': self.hrana,
+            'energie': self.energie,
+            'fericire': self.fericire,
+            'sanatate': self.sanatate,
+            'stare': 'doarme' if self.este_adormit else 'treaz'
+        }
+        msg = String()
+        msg.data = json.dumps(stare_dict)
+        self.status_publisher.publish(msg)
+
     def life_cycle_tick(self):
         """Simuleaza trecerea timpului si consumul metabolic de resurse."""
         if self.este_adormit:
@@ -69,21 +84,10 @@ class TamagotchiStateNode(Node):
             if self.hrana < 20 or self.energie < 15:
                 self.sanatate = max(0, self.sanatate - 2)
 
-        # Pachetul de stare in format JSON
-        stare_dict = {
-            'hrana': self.hrana,
-            'energie': self.energie,
-            'fericire': self.fericire,
-            'sanatate': self.sanatate,
-            'stare': 'doarme' if self.este_adormit else 'treaz'
-        }
-
-        msg = String()
-        msg.data = json.dumps(stare_dict)
-        self.status_publisher.publish(msg)
+        self.publish_status()
 
     def action_callback(self, msg: String):
-        """Actualizeaza nevoile biologice in functie de actiunea executata."""
+        """Actualizeaza nevoile biologice in functie de actiunea executata si publica starea imediat."""
         actiune = msg.data.strip().lower()
 
         if actiune in ['feed', 'hrana', 'mananca']:
@@ -120,7 +124,10 @@ class TamagotchiStateNode(Node):
                 self.energie = max(0, self.energie - 15)
                 self.get_logger().info(f'🏆 Turul arenei in executie! (+25 Fericire={self.fericire}%, -15 Energie={self.energie}%)')
 
-        elif actiune.startswith('rotate') or actiune in ['forward', 'backward', 'forward_backward', 'turn_left', 'turn_right', 'inainte', 'inapoi', 'fata_spate', 'stanga', 'dreapta']:
+        elif actiune.startswith('rotate') or actiune in [
+            'forward', 'backward', 'forward_backward', 'turn_left', 'turn_right',
+            'inainte', 'inapoi', 'fata_spate', 'stanga', 'dreapta'
+        ]:
             if not self.este_adormit:
                 self.fericire = min(100, self.fericire + 10)
                 self.energie = max(0, self.energie - 5)
@@ -128,6 +135,9 @@ class TamagotchiStateNode(Node):
 
         elif actiune in ['stop', 'stai', 'oprire', 'frana']:
             self.get_logger().info('🛑 Oprire confirmata in State Node.')
+
+        # Publicam imediat noua stare pentru sincronizare instantanee cu llm_node
+        self.publish_status()
 
 
 def main(args=None):

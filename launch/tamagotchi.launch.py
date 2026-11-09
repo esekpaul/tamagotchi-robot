@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 Fisierul Launch pentru Tamagotchi Robot
-Porneste automat nodul de stare si nodul de miscare
+Porneste automat:
+1. Nodul de Stare Biologica (state_node)
+2. Nodul de Miscare / Control Fizic (motion_node)
+3. Nodul de Viziune Artificiala in mod STANDBY / la cerere (vision_node)
 """
 
 from launch import LaunchDescription
@@ -22,6 +25,13 @@ def generate_launch_description():
             package='tamagotchi_robot',
             executable='motion_node',
             name='tamagotchi_motion',
+            output='screen'
+        ),
+        # 3. Nodul de Viziune Faciala (porneste cu camera OPRITA in standby, activabil la comanda)
+        Node(
+            package='tamagotchi_robot',
+            executable='vision_node',
+            name='tamagotchi_vision',
             output='screen'
         ),
     ])

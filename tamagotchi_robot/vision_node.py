@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Nodul de Viziune Artificiala si Recunoastere Emotionala Faciala
+Nodul de Viziune Artificiala si Recunoastere Emotionala Faciala (Controlabil la Cerere)
 Proiect Sincretic: Robot Tamagotchi
 Functionalitate:
-1. Acceseaza camera laptopului (/dev/video0).
-2. Detecteaza fata utilizatorului in timp real (Haar Cascade).
-3. Clasifica expresia faciala (Fericit / Trist / Neutru / Surprins) folosind reteaua neuronala profunda Emotion-FERPlus (ONNX).
-4. Publica emotia detectata pe topicul /tamagotchi/emotion.
-5. Afiseaza o interfata vizuala interactiva cu dreptunghi colorat si emoji corespunzator starii.
+1. Porneste implicit in modul STANDBY (camera oprita) pana cand utilizatorul o activeaza.
+2. Asculta comenzi de control pe /tamagotchi/vision_control:
+   - 'start' / 'on'   : Deschide camera (/dev/video0) si fereastra vizuala live.
+   - 'stop'  / 'off'  : Inchide fereastra vizuala si elibereaza camera web.
+   - 'toggle'         : Comuta intre pornit si oprit.
+3. Clasifica expresia faciala (Fericit / Trist / Neutru) folosind Emotion-FERPlus (ONNX) + Haar Cascade.
+4. Publica emotia detectata in timp real pe topicul /tamagotchi/emotion pentru reactia automata a robotului.
 """
 
 import os
@@ -26,6 +28,14 @@ class TamagotchiVisionNode(Node):
 
         # Topic pentru publicarea emotiei detectate
         self.emotion_pub = self.create_publisher(String, '/tamagotchi/emotion', 10)
+
+        # Topic pentru controlul camerei (start / stop / toggle)
+        self.control_sub = self.create_subscription(
+            String,
+            '/tamagotchi/vision_control',
+            self.control_callback,
+            10
+        )
 
         # Cai fisiere modele
         models_dir = os.path.expanduser('~/ros2_ws/src/tamagotchi_robot/models')
@@ -46,78 +56,139 @@ class TamagotchiVisionNode(Node):
             self.net_available = False
             self.get_logger().warn('Fisierul ONNX nu a fost gasit, folosesc detectorul geometric Haar!')
 
-        # Clase de emotie FERPlus: 0: neutral, 1: happiness, 2: surprise, 3: sadness, 4: anger, 5: disgust, 6: fear, 7: contempt
+        # Clase de emotie FERPlus: 0:neutral, 1:happiness, 2:surprise, 3:sadness, 4:anger, 5:disgust, 6:fear, 7:contempt
         self.emotion_labels = ['neutral', 'happiness', 'surprise', 'sadness', 'anger', 'disgust', 'fear', 'contempt']
 
-        # Initializare camera web
+        # Starea camerei (implicit OPRITA pana la comanda utilizatorului)
+        self.cap = None
+        self.camera_active = False
+        self.window_name = "Tamagotchi Face Emotion Vision"
+
+        # Memorie pentru stabilitatea emotiei
+        self.history = []
+        self.last_published_emotion = None
+        self.last_published_time = 0.0
+
+        self.get_logger().info('=' * 60)
+        self.get_logger().info('👁️  Nodul Tamagotchi Vision este pregatit (Mod STANDBY - Camera Oprita).')
+        self.get_logger().info('   - Controleaza camera pe: /tamagotchi/vision_control (start/stop/toggle)')
+        self.get_logger().info('   - Publica emotiile pe: /tamagotchi/emotion')
+        self.get_logger().info('=' * 60)
+
+        # Timer procesare cadre la 10 FPS (ruleaza doar cand camera este activata)
+        self.timer = self.create_timer(0.10, self.process_frame)
+
+    def start_camera(self):
+        """Deschide camera web si fereastra OpenCV."""
+        if self.camera_active and self.cap and self.cap.isOpened():
+            return True
+
         self.cap = cv2.VideoCapture(0)
         if not self.cap.isOpened():
             self.cap = cv2.VideoCapture(1)
 
         if not self.cap.isOpened():
-            self.get_logger().error('Nu s-a putut deschide nicio camera web (/dev/video0 sau /dev/video1)!')
-        else:
-            self.get_logger().info('=' * 60)
-            self.get_logger().info('👁️  Nodul Tamagotchi Vision a pornit camera laptopului!')
-            self.get_logger().info('   Publica emotiile detectate pe: /tamagotchi/emotion')
-            self.get_logger().info('=' * 60)
+            self.get_logger().error('Nu s-a putut deschide camera web (/dev/video0 sau /dev/video1)!')
+            self.cap = None
+            self.camera_active = False
+            return False
 
-        # Memorie pentru stabilitatea emotiei (evita fluctuatiile bruste)
-        self.history = []
+        self.camera_active = True
+        self.history.clear()
         self.last_published_emotion = None
         self.last_published_time = 0.0
+        self.get_logger().info('🟢 Camera web a fost PORNITA!')
+        return True
 
-        # Timer procesare cadre la 10 FPS (echilibru optim intre fluiditate si consum redus CPU)
-        self.timer = self.create_timer(0.10, self.process_frame)
+    def stop_camera(self):
+        """Inchide fereastra OpenCV si elibereaza camera web."""
+        was_active = self.camera_active
+        if self.cap and self.cap.isOpened():
+            self.cap.release()
+        self.cap = None
+        self.camera_active = False
+        self.history.clear()
+        self.last_published_emotion = None
+        try:
+            cv2.destroyWindow(self.window_name)
+            cv2.destroyAllWindows()
+            for _ in range(4):
+                cv2.waitKey(1)
+        except Exception:
+            pass
+
+        if was_active:
+            msg = String()
+            msg.data = json.dumps({'emotion': 'camera_closed', 'camera_active': False, 'timestamp': time.time()})
+            self.emotion_pub.publish(msg)
+            self.get_logger().info('🔴 Camera web a fost OPRITA.')
+
+    def control_callback(self, msg: String):
+        """Proceseaza comenzile de pornire/oprire a camerei."""
+        cmd = msg.data.strip().lower()
+        if cmd in ['start', 'on', 'open', 'porneste', 'deschide', 'snapshot']:
+            self.start_camera()
+        elif cmd in ['stop', 'off', 'close', 'opreste', 'inchide']:
+            self.stop_camera()
+        elif cmd == 'toggle':
+            if self.camera_active:
+                self.stop_camera()
+            else:
+                self.start_camera()
 
     def classify_face_emotion(self, face_gray):
         """Clasifica emotia fetei folosind reteaua neuronala ONNX si Haar smile booster."""
+        h, w = face_gray.shape
+        mouth_roi = face_gray[int(h * 0.55):h, :]
+        smiles = self.smile_cascade.detectMultiScale(mouth_roi, scaleFactor=1.7, minNeighbors=20)
+        has_smile = len(smiles) > 0
+
         if not self.net_available:
+            if has_smile:
+                return 'happy', 0.85
             return 'neutral', 0.5
 
-        # Redimensionare la 64x64 conform specificatiilor Emotion-FERPlus
         resized = cv2.resize(face_gray, (64, 64))
         blob = resized.astype(np.float32).reshape(1, 1, 64, 64)
 
         self.net.setInput(blob)
         preds = self.net.forward()[0]
 
-        # Calcul probabilitati prin Softmax
         exp_preds = np.exp(preds - np.max(preds))
         probs = exp_preds / np.sum(exp_preds)
         idx_max = int(np.argmax(probs))
         label_raw = self.emotion_labels[idx_max]
         confidence = float(probs[idx_max])
 
-        # Verificare suplimentara pentru zambet (Haar Smile)
-        # In jumatatea inferioara a fetei (regiunea gurii)
-        h, w = face_gray.shape
-        mouth_roi = face_gray[int(h * 0.55):h, :]
-        smiles = self.smile_cascade.detectMultiScale(mouth_roi, scaleFactor=1.7, minNeighbors=20)
-        has_smile = len(smiles) > 0
+        # Probabilitati agregate pentru sensibilitate ridicata la zambet si tristete
+        pos_prob = float(probs[1] + probs[2])               # happiness + surprise
+        neg_prob = float(np.sum(probs[3:]))                 # sadness + anger + disgust + fear + contempt
 
-        # Mapeaza in categoriile cheie: 'happy', 'sad', 'neutral'
-        if label_raw in ['happiness', 'surprise'] or has_smile:
-            return 'happy', max(confidence, 0.85 if has_smile else confidence)
-        elif label_raw in ['sadness', 'anger', 'fear', 'disgust', 'contempt']:
-            return 'sad', confidence
+        if label_raw in ['happiness', 'surprise'] or has_smile or pos_prob >= 0.35:
+            conf_out = max(confidence, pos_prob, 0.85 if has_smile else 0.75)
+            return 'happy', min(0.99, conf_out)
+        elif label_raw in ['sadness', 'anger', 'fear', 'disgust', 'contempt'] or neg_prob >= 0.22:
+            conf_out = max(confidence, neg_prob, 0.75)
+            return 'sad', min(0.99, conf_out)
         else:
             return 'neutral', confidence
 
     def process_frame(self):
-        """Capteaza un cadru, detecteaza fata, clasifica emotia si afiseaza interfata."""
+        """Capteaza un cadru doar daca camera este activa, detecteaza fata si publica emotia."""
+        if not self.camera_active:
+            return
+
         if not self.cap or not self.cap.isOpened():
+            self.stop_camera()
             return
 
         ret, frame = self.cap.read()
         if not ret:
             return
 
-        # Oglindim cadrul pe orizontala (efect natural de oglinda)
         frame = cv2.flip(frame, 1)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # Optimizare CPU: detectie faciala pe rezolutie scalata la 50%
         small_gray = cv2.resize(gray, (0, 0), fx=0.5, fy=0.5)
         faces_small = self.face_cascade.detectMultiScale(
             small_gray,
@@ -126,11 +197,7 @@ class TamagotchiVisionNode(Node):
             minSize=(40, 40)
         )
 
-        detected_emotion = 'none'
-        confidence = 0.0
-
         if len(faces_small) > 0:
-            # Rescalam coordonatele la dimensiunea originala
             faces = [(x*2, y*2, w*2, h*2) for (x, y, w, h) in faces_small]
             faces_sorted = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
             x, y, w, h = faces_sorted[0]
@@ -138,44 +205,36 @@ class TamagotchiVisionNode(Node):
 
             detected_emotion, confidence = self.classify_face_emotion(face_roi_gray)
 
-            # Istoric pentru filtrare zgomot
             self.history.append(detected_emotion)
-            if len(self.history) > 6:
+            if len(self.history) > 5:
                 self.history.pop(0)
 
-            # Emotia dominanta din istoric
             dominant_emotion = max(set(self.history), key=self.history.count)
 
-            # Configurare culori si etichete
             if dominant_emotion == 'happy':
-                color = (0, 230, 0)      # Verde vibrant
+                color = (0, 230, 0)
                 text_label = f"FERICIT / ZAMBITOR ({int(confidence*100)}%)"
-                emoji_icon = "😊"
             elif dominant_emotion == 'sad':
-                color = (0, 100, 255)    # Portocaliu / Albastru
+                color = (0, 100, 255)
                 text_label = f"TRIST / SUPARAT ({int(confidence*100)}%)"
-                emoji_icon = "😢"
             else:
-                color = (220, 220, 220)  # Gri deschis
+                color = (220, 220, 220)
                 text_label = f"NEUTRU / CALM ({int(confidence*100)}%)"
-                emoji_icon = "😐"
 
-            # Desenare chenar fata si eticheta
             cv2.rectangle(frame, (x, y), (x+w, y+h), color, 3)
+            cv2.rectangle(frame, (x, max(0, y - 35)), (x + w, y), color, -1)
+            cv2.putText(frame, text_label, (x + 8, max(20, y - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 0, 0), 2, cv2.LINE_AA)
 
-            # Bara de eticheta eleganta deasupra fetei
-            cv2.rectangle(frame, (x, y - 35), (x + w, y), color, -1)
-            cv2.putText(frame, text_label, (x + 8, y - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 2, cv2.LINE_AA)
-
-            # Publicam pe topic daca s-a schimbat starea sau la interval de 2 secunde
+            # Publicam pe /tamagotchi/emotion imediat la schimbarea emotiei sau la fiecare 1.5s
             now = time.time()
-            if (dominant_emotion != self.last_published_emotion or (now - self.last_published_time > 2.0)):
+            if (dominant_emotion != self.last_published_emotion or (now - self.last_published_time > 1.5)):
                 msg = String()
                 payload = {
                     'emotion': dominant_emotion,
                     'confidence': round(confidence, 2),
                     'face_detected': True,
+                    'camera_active': True,
                     'timestamp': now
                 }
                 msg.data = json.dumps(payload)
@@ -184,28 +243,24 @@ class TamagotchiVisionNode(Node):
                 self.last_published_time = now
         else:
             self.history.clear()
-            cv2.putText(frame, "Priveste spre camera pentru a-ti citi expresia...", (30, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2, cv2.LINE_AA)
+            cv2.putText(frame, "Priveste spre camera pentru a-ti citi expresia...", (25, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.68, (0, 165, 255), 2, cv2.LINE_AA)
 
-        # Banner informativ in partea de jos
-        cv2.rectangle(frame, (0, frame.shape[0] - 40), (frame.shape[0] + 200, frame.shape[0]), (25, 25, 25), -1)
-        cv2.putText(frame, "Tamagotchi Facial Emotion AI  |  Apasa 'q' pentru a inchide fereastra",
-                    (15, frame.shape[0] - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (200, 200, 200), 1, cv2.LINE_AA)
+        h_frame, w_frame = frame.shape[:2]
+        cv2.rectangle(frame, (0, h_frame - 40), (w_frame, h_frame), (25, 25, 25), -1)
+        cv2.putText(frame, "Tamagotchi Emotion AI  |  Apasa 'q' sau scrie 'c' / 'opreste camera' pt inchidere",
+                    (15, h_frame - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200, 200, 200), 1, cv2.LINE_AA)
 
-        # Afisare fereastra video
         try:
-            cv2.imshow("Tamagotchi Face Emotion Vision", frame)
+            cv2.imshow(self.window_name, frame)
             key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                self.destroy_node()
-                rclpy.shutdown()
+            if key in [ord('q'), 27]:
+                self.stop_camera()
         except Exception:
             pass
 
     def destroy_node(self):
-        if self.cap and self.cap.isOpened():
-            self.cap.release()
-        cv2.destroyAllWindows()
+        self.stop_camera()
         super().destroy_node()
 
 

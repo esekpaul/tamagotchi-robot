@@ -2,10 +2,10 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>tamagotchi_robot</name>
-  <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="esek@todo.todo">esek</maintainer>
-  <license>TODO: License declaration</license>
+  <version>1.0.0</version>
+  <description>Proiect Sincretic: Robot Tamagotchi autonom in ROS 2 Jazzy si Gazebo cu control vocal, LLM local, navigatie LiDAR si recunoastere a emotiilor faciale ONNX.</description>
+  <maintainer email="esek@local">esek</maintainer>
+  <license>MIT</license>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
